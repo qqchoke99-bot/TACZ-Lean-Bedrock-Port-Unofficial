@@ -10,19 +10,9 @@
 namespace {
 
 constexpr std::uintptr_t kRotationOffset = 0x28;
-constexpr float kDeg2Rad = 0.01745329251f;
 
 struct Quat { float x, y, z, w; };
 struct Vec3 { float x, y, z; };
-
-Quat quatMul(const Quat& a, const Quat& b) {
-    return {
-        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
-        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
-        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
-        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
-    };
-}
 
 Quat quatNormalize(const Quat& q) {
     const float n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
@@ -30,50 +20,52 @@ Quat quatNormalize(const Quat& q) {
     return {q.x / n, q.y / n, q.z / n, q.w / n};
 }
 
-// Axis-angle (axis must be unit)
-Quat axisAngle(float ax, float ay, float az, float angleRad) {
-    const float h = angleRad * 0.5f;
-    const float s = std::sin(h);
-    return {ax * s, ay * s, az * s, std::cos(h)};
-}
-
-// Camera local right (horizontal) from quat
+// Horizontal right from camera quat (XZ only)
 Vec3 rightFromQuat(const Quat& q) {
     Vec3 r{
         1.f - 2.f * (q.y * q.y + q.z * q.z),
-        2.f * (q.x * q.y + q.w * q.z),
+        0.f,
         2.f * (q.x * q.z - q.w * q.y),
     };
-    r.y = 0.f;
     const float len = std::sqrt(r.x * r.x + r.z * r.z);
     if (len > 1e-5f) {
         r.x /= len;
         r.z /= len;
+    } else {
+        r = {1.f, 0.f, 0.f};
     }
     return r;
 }
 
-bool looksLikeWorldPos(const float* p) {
-    if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2])) return false;
-    const float ax = std::fabs(p[0]), ay = std::fabs(p[1]), az = std::fabs(p[2]);
-    if (ax < 0.01f && ay < 0.01f && az < 0.01f) return false;
-    if (ax > 3e6f || az > 3e6f || ay > 5000.f) return false;
-    return true;
-}
-
-constexpr std::uintptr_t kPosCandidates[] = {
-    0x00, 0x08, 0x10, 0x18, 0x1C, 0x20, 0x30, 0x38, 0x40, 0x48, 0x50, 0x60,
-};
-
-void tryShiftPosition(void* obj, const Vec3& right, float lateral) {
-    if (!obj || std::fabs(lateral) < 0.0005f) return;
+/*
+ * Pure eye-position shift. No yaw / pitch.
+ * Write several fixed slots relative to camera component layout:
+ *   - Vec3 candidates near known quat @ 0x28
+ *   - mat4 translation (column-major m[12], m[14])
+ */
+void applyPositionShift(void* obj, const Vec3& right, float lateral) {
+    if (!obj || std::fabs(lateral) < 1e-5f) return;
     auto* base = reinterpret_cast<char*>(obj);
-    for (const auto off : kPosCandidates) {
+
+    const std::uintptr_t vecOffs[] = {
+        0x00, 0x08, 0x0C, 0x10, 0x14, 0x18, 0x1C, 0x20,
+        0x34, 0x38, 0x3C, 0x40, 0x48, 0x50, 0x58, 0x60,
+        0x68, 0x70, 0x80, 0x90, 0xA0, 0xB0,
+    };
+
+    for (auto off : vecOffs) {
         auto* p = reinterpret_cast<float*>(base + off);
-        if (!looksLikeWorldPos(p)) continue;
+        if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2])) continue;
+        // Always apply XZ shift (aggressive — needed when heuristics skipped the real field)
         p[0] += right.x * lateral;
         p[2] += right.z * lateral;
-        break;
+    }
+
+    // mat4 @ 0 translation
+    auto* m = reinterpret_cast<float*>(base);
+    if (std::isfinite(m[12]) && std::isfinite(m[14])) {
+        m[12] += right.x * lateral;
+        m[14] += right.z * lateral;
     }
 }
 
@@ -81,6 +73,7 @@ using CameraBlendFn = void (*)(void*, void*, float);
 CameraBlendFn g_orig = nullptr;
 
 void cameraBlendHook(void* component, void* blendState, float factor) {
+    // Run game first so component holds the final camera for this frame
     if (g_orig) g_orig(component, blendState, factor);
     auto& mod = taczlean::LeanModule::get();
     mod.onCameraBlend(component, 1.f / 60.f);
@@ -144,30 +137,30 @@ void LeanModule::onButtonRight(bool down) {
 }
 
 void LeanModule::updateTargets() {
-    // Left lean: negative angle, shift camera to the left (-right)
-    float target = 0.f;
     float lat = 0.f;
+    float ang = 0.f;
     if (m_left.load() && !m_right.load()) {
-        target = -m_maxLeanDeg;
         lat = -m_lateralOffset;
+        ang = -m_maxLeanDeg;
     } else if (m_right.load() && !m_left.load()) {
-        target = m_maxLeanDeg;
         lat = m_lateralOffset;
+        ang = m_maxLeanDeg;
     }
-    m_targetAngle = target;
     m_targetLateral = lat;
+    m_targetAngle = ang;
 }
 
 void LeanModule::applyLateralOnly(void* anyCameraObj) {
     if (!m_enabled || !m_enableLateral || !anyCameraObj) return;
-    if (std::fabs(m_currentLateral) < 0.0005f) return;
+    if (std::fabs(m_currentLateral) < 1e-5f) return;
 
-    auto* base = reinterpret_cast<char*>(anyCameraObj);
-    auto* qf = reinterpret_cast<float*>(base + kRotationOffset);
+    Vec3 right{1.f, 0.f, 0.f};
+    auto* qf = reinterpret_cast<float*>(reinterpret_cast<char*>(anyCameraObj) + kRotationOffset);
     Quat cur{qf[0], qf[1], qf[2], qf[3]};
     const float qlen = std::sqrt(cur.x * cur.x + cur.y * cur.y + cur.z * cur.z + cur.w * cur.w);
-    Vec3 right = (qlen > 0.5f && qlen < 1.5f) ? rightFromQuat(cur) : Vec3{1.f, 0.f, 0.f};
-    tryShiftPosition(anyCameraObj, right, m_currentLateral);
+    if (qlen > 0.5f && qlen < 1.5f) right = rightFromQuat(quatNormalize(cur));
+
+    applyPositionShift(anyCameraObj, right, m_currentLateral);
 }
 
 void LeanModule::onCameraBlend(void* cameraComponent, float /*dt*/) {
@@ -176,52 +169,58 @@ void LeanModule::onCameraBlend(void* cameraComponent, float /*dt*/) {
     updateTargets();
 
     const float s = std::clamp(m_smoothFactor, 0.05f, 1.f);
-    m_currentAngle += (m_targetAngle - m_currentAngle) * s;
     m_currentLateral += (m_targetLateral - m_currentLateral) * s;
-
-    if (std::fabs(m_currentAngle) < 0.01f && std::fabs(m_targetAngle) < 0.01f)
-        m_currentAngle = 0.f;
-    if (std::fabs(m_currentLateral) < 0.0005f && std::fabs(m_targetLateral) < 0.0005f)
+    m_currentAngle += (m_targetAngle - m_currentAngle) * s;
+    if (std::fabs(m_currentLateral) < 1e-5f && std::fabs(m_targetLateral) < 1e-5f)
         m_currentLateral = 0.f;
 
     auto* base = reinterpret_cast<char*>(cameraComponent);
     auto* qf = reinterpret_cast<float*>(base + kRotationOffset);
     Quat cur{qf[0], qf[1], qf[2], qf[3]};
     const float qlen = std::sqrt(cur.x * cur.x + cur.y * cur.y + cur.z * cur.z + cur.w * cur.w);
-    if (!(qlen > 0.5f && qlen < 1.5f)) return;
-    cur = quatNormalize(cur);
 
-    const Vec3 right = rightFromQuat(cur);
-
-    // 1) Shift eye left/right (true peek past wall)
-    if (m_enableLateral && std::fabs(m_currentLateral) > 0.0005f) {
-        tryShiftPosition(cameraComponent, right, m_currentLateral);
+    Vec3 right{1.f, 0.f, 0.f};
+    if (qlen > 0.5f && qlen < 1.5f) {
+        cur = quatNormalize(cur);
+        right = rightFromQuat(cur);
     }
 
-    // 2) Rotation — ONLY roll (tilt) + horizontal yaw around world UP
-    //    Never pitch (no look up/down)
-    Quat out = cur;
-
-    if (m_enableRoll && std::fabs(m_currentAngle) > 0.01f) {
-        const float rollRad = m_currentAngle * m_firstPersonRollMult * kDeg2Rad;
-        // Roll around view-forward-ish: use local Z like CameraOverhaul
-        out = quatMul(out, axisAngle(0.f, 0.f, 1.f, rollRad));
+    // 1) Position only — same look direction, eye moves sideways
+    if (m_enableLateral && std::fabs(m_currentLateral) > 1e-5f) {
+        applyPositionShift(cameraComponent, right, m_currentLateral);
     }
 
-    // Horizontal peek yaw around world Y only (helps see past corner)
-    // Scale with lateral slider: at 0.22 blocks → ~10° yaw toward lean side
-    if (m_enableLateral && std::fabs(m_currentLateral) > 0.0005f) {
-        const float yawDeg = (m_currentLateral / 0.22f) * 10.f;
-        const float yawRad = yawDeg * kDeg2Rad;
-        // World-up yaw applied on the left so it stays horizon-level
-        out = quatMul(axisAngle(0.f, 1.f, 0.f, yawRad), out);
+    // 2) Optional roll (tilt) — no yaw, no pitch
+    if (m_enableRoll && qlen > 0.5f && std::fabs(m_currentAngle) > 0.01f) {
+        const float h = m_currentAngle * m_firstPersonRollMult * 0.01745329251f * 0.5f;
+        const float sz = std::sin(h), cz = std::cos(h);
+        Quat out{
+            cur.w * 0.f + cur.x * cz + cur.y * sz - cur.z * 0.f,
+            cur.w * 0.f - cur.x * sz + cur.y * cz + cur.z * 0.f,
+            cur.w * sz + cur.x * 0.f - cur.y * 0.f + cur.z * cz,
+            cur.w * cz - cur.x * 0.f - cur.y * 0.f - cur.z * sz,
+        };
+        // cur * roll(z)
+        out = {
+            cur.x * cz + cur.y * sz,
+            -cur.x * sz + cur.y * cz,
+            cur.z * cz + cur.w * sz,
+            -cur.z * sz + cur.w * cz,
+        };
+        // Correct quat multiply cur * (0,0,sin,cos)
+        const Quat r{0.f, 0.f, sz, cz};
+        out = {
+            cur.w * r.x + cur.x * r.w + cur.y * r.z - cur.z * r.y,
+            cur.w * r.y - cur.x * r.z + cur.y * r.w + cur.z * r.x,
+            cur.w * r.z + cur.x * r.y - cur.y * r.x + cur.z * r.w,
+            cur.w * r.w - cur.x * r.x - cur.y * r.y - cur.z * r.z,
+        };
+        out = quatNormalize(out);
+        qf[0] = out.x;
+        qf[1] = out.y;
+        qf[2] = out.z;
+        qf[3] = out.w;
     }
-
-    out = quatNormalize(out);
-    qf[0] = out.x;
-    qf[1] = out.y;
-    qf[2] = out.z;
-    qf[3] = out.w;
 }
 
 void LeanModule::loadConfig(const nlohmann::json& j) {
