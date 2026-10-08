@@ -9,14 +9,16 @@
 
 namespace {
 
+// From CameraBlendSystem disasm (1.26.x):
+//   ldur q0, [x0, #0x28]  -> rotation quat (16 bytes)
+//   ldr  s0, [x0, #0x38]  -> float
+//   ldr  s0, [x0, #0x3c]  -> float
+//   ldr  s0, [x0, #0x40]  -> float
+// Confirmed: CO uses +0x28 for rotation. Triple at +0x38 is position candidate.
 constexpr std::uintptr_t kRotationOffset = 0x28;
 constexpr std::uintptr_t kPosXOffset     = 0x38;
 constexpr std::uintptr_t kPosYOffset     = 0x3C;
 constexpr std::uintptr_t kPosZOffset     = 0x40;
-
-// Safe Offset Reference for Player Actor
-constexpr std::uintptr_t kPlayerActorOffset = 0x18;
-constexpr std::uintptr_t kActorBodyRollOffset = 0x118;
 
 struct Quat { float x, y, z, w; };
 struct Vec3 { float x, y, z; };
@@ -54,6 +56,7 @@ Vec3 rightFromQuat(const Quat& q) {
 
 bool looksLikePos(float x, float y, float z) {
     if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return false;
+    // Reject near-zero (unset) and absurd world coords
     if (std::fabs(x) < 1e-4f && std::fabs(y) < 1e-4f && std::fabs(z) < 1e-4f) return false;
     if (std::fabs(x) > 3e6f || std::fabs(z) > 3e6f) return false;
     if (y < -128.f || y > 4000.f) return false;
@@ -127,6 +130,8 @@ void LeanModule::onButtonRight(bool down) {
 void LeanModule::updateTargets() {
     float ang = 0.f;
     float lat = 0.f;
+    // Position must move the same visual direction as the roll tilt.
+    // (angle sign and world-right vector are opposite in this camera space)
     if (m_left.load() && !m_right.load()) {
         ang = -m_maxLeanDeg;
         lat = m_lateralOffset;
@@ -139,26 +144,6 @@ void LeanModule::updateTargets() {
 }
 
 void LeanModule::applyLateralOnly(void*) {}
-
-void LeanModule::applyThirdPersonLean(void* cameraComponent) {
-    if (!cameraComponent) return;
-
-    auto* base = reinterpret_cast<char*>(cameraComponent);
-    
-    // Strict direct pointer check to prevent invalid memory crash
-    auto** playerPtr = reinterpret_cast<char**>(base + kPlayerActorOffset);
-    if (!playerPtr || !*playerPtr) return;
-
-    char* actor = *playerPtr;
-    
-    // Safety check on Address
-    if (reinterpret_cast<uintptr_t>(actor) < 0x10000 || reinterpret_cast<uintptr_t>(actor) % 4 != 0) return;
-
-    auto* bodyRoll = reinterpret_cast<float*>(actor + kActorBodyRollOffset);
-    if (std::isfinite(*bodyRoll)) {
-        *bodyRoll = m_currentAngle;
-    }
-}
 
 void LeanModule::onCameraBlend(void* cameraComponent, float /*dt*/) {
     if (!m_enabled || !cameraComponent) return;
@@ -175,23 +160,27 @@ void LeanModule::onCameraBlend(void* cameraComponent, float /*dt*/) {
 
     auto* base = reinterpret_cast<char*>(cameraComponent);
 
+    // --- Rotation quat @ +0x28 (proven stable) ---
     auto* qf = reinterpret_cast<float*>(base + kRotationOffset);
     Quat cur{qf[0], qf[1], qf[2], qf[3]};
     const float qlen = std::sqrt(cur.x * cur.x + cur.y * cur.y + cur.z * cur.z + cur.w * cur.w);
     if (!(qlen > 0.5f && qlen < 1.5f)) return;
     cur = quatNormalize(cur);
 
+    // --- Position @ +0x38,+0x3c,+0x40 (from CameraBlendSystem copy) ---
     if (m_enableLateral && std::fabs(m_currentLateral) > 1e-5f) {
         auto* px = reinterpret_cast<float*>(base + kPosXOffset);
         auto* py = reinterpret_cast<float*>(base + kPosYOffset);
         auto* pz = reinterpret_cast<float*>(base + kPosZOffset);
         if (looksLikePos(*px, *py, *pz)) {
             const Vec3 right = rightFromQuat(cur);
+            // Only shift XZ — keep look direction, no pitch/yaw
             *px += right.x * m_currentLateral;
             *pz += right.z * m_currentLateral;
         }
     }
 
+    // --- Optional roll only (no yaw / pitch) ---
     if (m_enableRoll && std::fabs(m_currentAngle) > 0.01f) {
         const float h = m_currentAngle * m_firstPersonRollMult * 0.01745329251f * 0.5f;
         const Quat rollQ{0.f, 0.f, std::sin(h), std::cos(h)};
@@ -201,8 +190,6 @@ void LeanModule::onCameraBlend(void* cameraComponent, float /*dt*/) {
         qf[2] = out.z;
         qf[3] = out.w;
     }
-
-    applyThirdPersonLean(cameraComponent);
 }
 
 void LeanModule::loadConfig(const nlohmann::json& j) {
