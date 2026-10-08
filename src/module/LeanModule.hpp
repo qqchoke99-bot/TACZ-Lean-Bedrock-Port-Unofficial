@@ -15,6 +15,7 @@ public:
     void init();
     void shutdown();
     void onCameraBlend(void* cameraComponent, float dt);
+    void applyLateralOnly(void* anyCameraObj);
 
     void setLeanLeft(bool held);
     void setLeanRight(bool held);
