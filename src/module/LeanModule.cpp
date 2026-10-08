@@ -130,12 +130,14 @@ void LeanModule::onButtonRight(bool down) {
 void LeanModule::updateTargets() {
     float ang = 0.f;
     float lat = 0.f;
+    // Position must move the same visual direction as the roll tilt.
+    // (angle sign and world-right vector are opposite in this camera space)
     if (m_left.load() && !m_right.load()) {
         ang = -m_maxLeanDeg;
-        lat = -m_lateralOffset;
+        lat = m_lateralOffset;
     } else if (m_right.load() && !m_left.load()) {
         ang = m_maxLeanDeg;
-        lat = m_lateralOffset;
+        lat = -m_lateralOffset;
     }
     m_targetAngle = ang;
     m_targetLateral = lat;
