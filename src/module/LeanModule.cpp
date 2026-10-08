@@ -14,9 +14,9 @@ constexpr std::uintptr_t kPosXOffset     = 0x38;
 constexpr std::uintptr_t kPosYOffset     = 0x3C;
 constexpr std::uintptr_t kPosZOffset     = 0x40;
 
+// Safe Offset Reference for Player Actor
 constexpr std::uintptr_t kPlayerActorOffset = 0x18;
-constexpr std::uintptr_t kRotZOffset        = 0x118;
-constexpr std::uintptr_t kRenderRotZOffset  = 0x11C;
+constexpr std::uintptr_t kActorBodyRollOffset = 0x118;
 
 struct Quat { float x, y, z, w; };
 struct Vec3 { float x, y, z; };
@@ -145,21 +145,18 @@ void LeanModule::applyThirdPersonLean(void* cameraComponent) {
 
     auto* base = reinterpret_cast<char*>(cameraComponent);
     
-    for (size_t offset = 0x0; offset <= 0x80; offset += sizeof(void*)) {
-        auto** ptrCandidate = reinterpret_cast<char**>(base + offset);
-        if (!ptrCandidate || !*ptrCandidate) continue;
+    // Strict direct pointer check to prevent invalid memory crash
+    auto** playerPtr = reinterpret_cast<char**>(base + kPlayerActorOffset);
+    if (!playerPtr || !*playerPtr) return;
 
-        char* possibleActor = *ptrCandidate;
-        if (reinterpret_cast<uintptr_t>(possibleActor) < 0x10000000) continue;
+    char* actor = *playerPtr;
+    
+    // Safety check on Address
+    if (reinterpret_cast<uintptr_t>(actor) < 0x10000 || reinterpret_cast<uintptr_t>(actor) % 4 != 0) return;
 
-        auto* rotZ = reinterpret_cast<float*>(possibleActor + kRotZOffset);
-        auto* renderRotZ = reinterpret_cast<float*>(possibleActor + kRenderRotZOffset);
-
-        if (std::isfinite(*rotZ) && std::fabs(*rotZ) < 360.0f) {
-            *rotZ = m_currentAngle;
-            *renderRotZ = m_currentAngle;
-            break;
-        }
+    auto* bodyRoll = reinterpret_cast<float*>(actor + kActorBodyRollOffset);
+    if (std::isfinite(*bodyRoll)) {
+        *bodyRoll = m_currentAngle;
     }
 }
 
