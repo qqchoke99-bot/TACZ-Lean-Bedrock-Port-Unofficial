@@ -10,8 +10,12 @@
 namespace {
 
 constexpr std::uintptr_t kRotationOffset = 0x28;
+// Camera component layout (CO family): position often before rotation quat.
+// Try Vec3 at 0x0 — if wrong, lateral still soft-fails (rotation-only still works).
+constexpr std::uintptr_t kPositionOffset = 0x0;
 
 struct Quat { float x, y, z, w; };
+struct Vec3 { float x, y, z; };
 
 Quat quatFromRollDeg(float rollDeg) {
     const float h = rollDeg * 0.01745329251f * 0.5f;
@@ -27,12 +31,21 @@ Quat quatMul(const Quat& a, const Quat& b) {
     };
 }
 
+// Camera local +X (right) from quaternion (x,y,z,w)
+Vec3 rightFromQuat(const Quat& q) {
+    // right = (1-2(y^2+z^2), 2(xy+wz), 2(xz-wy)) for standard rotation quat
+    return {
+        1.f - 2.f * (q.y * q.y + q.z * q.z),
+        2.f * (q.x * q.y + q.w * q.z),
+        2.f * (q.x * q.z - q.w * q.y),
+    };
+}
+
 using CameraBlendFn = void (*)(void*, void*, float);
 CameraBlendFn g_orig = nullptr;
 
 void cameraBlendHook(void* component, void* blend, float factor) {
     if (g_orig) g_orig(component, blend, factor);
-    // dt approx 1/60; LeanModule tracks time internally via smooth factor per call
     taczlean::LeanModule::get().onCameraBlend(component, 1.f / 60.f);
 }
 
@@ -60,57 +73,111 @@ void LeanModule::init() {
 void LeanModule::shutdown() {
     m_left = false;
     m_right = false;
-    m_targetAngle = m_currentAngle = m_prevAngle = 0.f;
+    m_toggleLeft = m_toggleRight = false;
+    m_targetAngle = m_currentAngle = 0.f;
+    m_targetLateral = m_currentLateral = 0.f;
 }
 
 void LeanModule::setLeanLeft(bool held) { m_left = held; }
 void LeanModule::setLeanRight(bool held) { m_right = held; }
 
+void LeanModule::onButtonLeft(bool down) {
+    if (m_holdMode) {
+        setLeanLeft(down);
+        if (down) setLeanRight(false);
+    } else if (down) {
+        // toggle
+        m_toggleLeft = !m_toggleLeft;
+        if (m_toggleLeft) m_toggleRight = false;
+        setLeanLeft(m_toggleLeft);
+        setLeanRight(false);
+    }
+}
+
+void LeanModule::onButtonRight(bool down) {
+    if (m_holdMode) {
+        setLeanRight(down);
+        if (down) setLeanLeft(false);
+    } else if (down) {
+        m_toggleRight = !m_toggleRight;
+        if (m_toggleRight) m_toggleLeft = false;
+        setLeanRight(m_toggleRight);
+        setLeanLeft(false);
+    }
+}
+
+void LeanModule::updateTargets() {
+    // Angle: negative = lean left, positive = lean right
+    float target = 0.f;
+    float lat = 0.f;
+    if (m_left.load() && !m_right.load()) {
+        target = -m_maxLeanDeg;
+        lat = -m_lateralOffset; // shift camera left
+    } else if (m_right.load() && !m_left.load()) {
+        target = m_maxLeanDeg;
+        lat = m_lateralOffset;
+    }
+    m_targetAngle = target;
+    m_targetLateral = lat;
+}
+
 void LeanModule::onCameraBlend(void* cameraComponent, float /*dt*/) {
     if (!m_enabled || !cameraComponent) return;
 
-    // Target like Java ClientEvents.onClientTick
-    float target = 0.f;
-    if (m_left.load() && !m_right.load()) target = -m_maxLeanDeg;
-    else if (m_right.load() && !m_left.load()) target = m_maxLeanDeg;
-    m_targetAngle = target;
+    updateTargets();
 
-    m_prevAngle = m_currentAngle;
-    // Smooth toward target (SMOOTH_FACTOR 0.25 per tick ≈ strong lerp)
-    m_currentAngle += (m_targetAngle - m_currentAngle) * m_smoothFactor;
+    const float s = std::clamp(m_smoothFactor, 0.05f, 1.f);
+    m_currentAngle += (m_targetAngle - m_currentAngle) * s;
+    m_currentLateral += (m_targetLateral - m_currentLateral) * s;
 
-    if (std::fabs(m_currentAngle) < 0.01f && std::fabs(m_targetAngle) < 0.01f) {
+    if (std::fabs(m_currentAngle) < 0.01f && std::fabs(m_targetAngle) < 0.01f)
         m_currentAngle = 0.f;
-        return;
+    if (std::fabs(m_currentLateral) < 0.0005f && std::fabs(m_targetLateral) < 0.0005f)
+        m_currentLateral = 0.f;
+
+    auto* base = reinterpret_cast<char*>(cameraComponent);
+    auto* qf = reinterpret_cast<float*>(base + kRotationOffset);
+    Quat cur{qf[0], qf[1], qf[2], qf[3]};
+    const float qlen = std::sqrt(cur.x * cur.x + cur.y * cur.y + cur.z * cur.z + cur.w * cur.w);
+    if (!(qlen > 0.5f && qlen < 1.5f)) return;
+
+    // --- Lateral eye offset (peek around cover) ---
+    if (m_enableLateral && std::fabs(m_currentLateral) > 0.0005f) {
+        auto* pos = reinterpret_cast<float*>(base + kPositionOffset);
+        // sanity: position should be finite world-ish coords
+        if (std::isfinite(pos[0]) && std::isfinite(pos[1]) && std::isfinite(pos[2]) &&
+            std::fabs(pos[0]) < 1e7f && std::fabs(pos[2]) < 1e7f) {
+            Vec3 right = rightFromQuat(cur);
+            // horizontal only
+            right.y = 0.f;
+            const float rl = std::sqrt(right.x * right.x + right.z * right.z);
+            if (rl > 1e-4f) {
+                right.x /= rl;
+                right.z /= rl;
+                pos[0] += right.x * m_currentLateral;
+                pos[2] += right.z * m_currentLateral;
+            }
+        }
     }
 
-    // Partial-tick style: use current (camera runs every frame)
-    const float angle = m_currentAngle;
-    const float rollDeg = angle * m_firstPersonRollMult;
-
-    auto* q = reinterpret_cast<float*>(reinterpret_cast<char*>(cameraComponent) + kRotationOffset);
-    Quat cur{q[0], q[1], q[2], q[3]};
-    const float len = std::sqrt(cur.x * cur.x + cur.y * cur.y + cur.z * cur.z + cur.w * cur.w);
-    if (!(len > 0.5f && len < 1.5f)) return;
-
-    Quat bias = quatFromRollDeg(rollDeg);
-    Quat out = quatMul(cur, bias);
-    const float n = std::sqrt(out.x * out.x + out.y * out.y + out.z * out.z + out.w * out.w);
-    if (n > 1e-6f) {
-        q[0] = out.x / n;
-        q[1] = out.y / n;
-        q[2] = out.z / n;
-        q[3] = out.w / n;
+    // --- Roll ---
+    if (m_enableRoll && std::fabs(m_currentAngle) > 0.01f) {
+        const float rollDeg = m_currentAngle * m_firstPersonRollMult;
+        Quat bias = quatFromRollDeg(rollDeg);
+        Quat out = quatMul(cur, bias);
+        const float n = std::sqrt(out.x * out.x + out.y * out.y + out.z * out.z + out.w * out.w);
+        if (n > 1e-6f) {
+            qf[0] = out.x / n;
+            qf[1] = out.y / n;
+            qf[2] = out.z / n;
+            qf[3] = out.w / n;
+        }
     }
 }
 
 void LeanModule::loadConfig(const nlohmann::json& j) {
     auto gf = [&](const char* k, float& v) {
         if (j.contains(k) && j[k].is_number()) v = j[k].get<float>();
-    };
-    auto gi = [&](const char* k, int& v) {
-        if (j.contains(k) && j[k].is_number_integer()) v = j[k].get<int>();
-        else if (j.contains(k) && j[k].is_number()) v = static_cast<int>(j[k].get<float>());
     };
     auto gb = [&](const char* k, bool& v) {
         if (j.contains(k) && j[k].is_boolean()) v = j[k].get<bool>();
@@ -119,15 +186,11 @@ void LeanModule::loadConfig(const nlohmann::json& j) {
     gf("maxLeanDeg", m_maxLeanDeg);
     gf("smoothFactor", m_smoothFactor);
     gf("firstPersonRollMult", m_firstPersonRollMult);
+    gf("lateralOffset", m_lateralOffset);
+    gb("enableRoll", m_enableRoll);
+    gb("enableLateral", m_enableLateral);
+    gb("holdMode", m_holdMode);
     gb("showButtons", m_showButtons);
-    gi("buttonBgSize", m_buttonBgSize);
-    gi("buttonIconSize", m_buttonIconSize);
-    gi("buttonLeftX", m_buttonLeftX);
-    gi("buttonLeftY", m_buttonLeftY);
-    gi("buttonRightX", m_buttonRightX);
-    gi("buttonRightY", m_buttonRightY);
-    gf("buttonIconOpacity", m_buttonIconOpacity);
-    gf("buttonBgOpacity", m_buttonBgOpacity);
 }
 
 void LeanModule::saveConfig(nlohmann::json& j) const {
@@ -135,15 +198,11 @@ void LeanModule::saveConfig(nlohmann::json& j) const {
     j["maxLeanDeg"] = m_maxLeanDeg;
     j["smoothFactor"] = m_smoothFactor;
     j["firstPersonRollMult"] = m_firstPersonRollMult;
+    j["lateralOffset"] = m_lateralOffset;
+    j["enableRoll"] = m_enableRoll;
+    j["enableLateral"] = m_enableLateral;
+    j["holdMode"] = m_holdMode;
     j["showButtons"] = m_showButtons;
-    j["buttonBgSize"] = m_buttonBgSize;
-    j["buttonIconSize"] = m_buttonIconSize;
-    j["buttonLeftX"] = m_buttonLeftX;
-    j["buttonLeftY"] = m_buttonLeftY;
-    j["buttonRightX"] = m_buttonRightX;
-    j["buttonRightY"] = m_buttonRightY;
-    j["buttonIconOpacity"] = m_buttonIconOpacity;
-    j["buttonBgOpacity"] = m_buttonBgOpacity;
 }
 
 } // namespace taczlean

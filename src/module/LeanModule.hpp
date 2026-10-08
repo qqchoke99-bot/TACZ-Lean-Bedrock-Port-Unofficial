@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <nlohmann/json.hpp>
+#include <string>
 
 namespace taczlean {
 
@@ -17,6 +18,8 @@ public:
 
     void setLeanLeft(bool held);
     void setLeanRight(bool held);
+    void onButtonLeft(bool down);
+    void onButtonRight(bool down);
 
     void setEnabled(bool v) { m_enabled = v; }
     bool enabled() const { return m_enabled; }
@@ -24,31 +27,32 @@ public:
     void loadConfig(const nlohmann::json& j);
     void saveConfig(nlohmann::json& j) const;
 
-    // From Java ClientEvents defaults
-    float m_maxLeanDeg{17.f};
-    float m_smoothFactor{0.25f};
-    // Java: toRadians(angle) * 55 ≈ angle * 0.96 degrees of roll
-    float m_firstPersonRollMult{0.96f};
-
-    bool m_enabled{true};
-    bool m_showButtons{true};
-    int m_buttonBgSize{160};
-    int m_buttonIconSize{100};
-    int m_buttonLeftX{120};
-    int m_buttonLeftY{700};
-    int m_buttonRightX{280};
-    int m_buttonRightY{700};
-    float m_buttonIconOpacity{0.85f};
-    float m_buttonBgOpacity{0.55f};
+    // Settings (exposed via Mod Menu)
+    float m_maxLeanDeg{17.f};          // max lean angle (degrees)
+    float m_smoothFactor{0.25f};       // 0..1 lerp per frame
+    float m_firstPersonRollMult{0.85f}; // roll strength relative to angle
+    float m_lateralOffset{0.22f};      // blocks — eye shift left/right (peek)
+    bool  m_enableRoll{true};
+    bool  m_enableLateral{true};
+    bool  m_holdMode{true};            // true=hold, false=toggle
+    bool  m_enabled{true};
+    bool  m_showButtons{true};
 
 private:
     LeanModule() = default;
     std::atomic<bool> m_left{false};
     std::atomic<bool> m_right{false};
+    // toggle latches
+    bool m_toggleLeft{false};
+    bool m_toggleRight{false};
+
     float m_targetAngle{0.f};
     float m_currentAngle{0.f};
-    float m_prevAngle{0.f};
+    float m_targetLateral{0.f};
+    float m_currentLateral{0.f};
     bool m_hooked{false};
+
+    void updateTargets();
 };
 
 } // namespace taczlean
