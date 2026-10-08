@@ -1,1 +1,15 @@
-
+{
+  "enabled": true,
+  "maxLeanDeg": 17.0,
+  "smoothFactor": 0.25,
+  "firstPersonRollMult": 0.96,
+  "showButtons": true,
+  "buttonBgSize": 160,
+  "buttonIconSize": 100,
+  "buttonLeftX": 120,
+  "buttonLeftY": 700,
+  "buttonRightX": 280,
+  "buttonRightY": 700,
+  "buttonIconOpacity": 0.85,
+  "buttonBgOpacity": 0.55
+}
