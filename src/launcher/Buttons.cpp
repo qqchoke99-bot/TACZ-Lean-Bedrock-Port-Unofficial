@@ -10,11 +10,15 @@
 #include <vector>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "TaczLean", __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "TaczLean", __VA_ARGS__)
 
 namespace fs = std::filesystem;
 
 namespace taczlean::buttons {
 namespace {
+
+// Must match levimod.json / package name used by launcher
+constexpr const char* kModId = "TaczLean";
 
 std::vector<unsigned char> readFile(const fs::path& p) {
     std::ifstream in(p, std::ios::binary);
@@ -35,15 +39,13 @@ std::vector<unsigned char> loadAsset(const char* name) {
     for (const auto& root : assetRoots()) {
         auto data = readFile(root / name);
         if (!data.empty()) {
-            LOGI("loaded %s from %s (%zu bytes)", name, root.c_str(), data.size());
+            LOGI("loaded %s (%zu bytes) from %s", name, data.size(), root.c_str());
             return data;
         }
     }
-    LOGI("asset not found: %s", name);
     return {};
 }
 
-// Q = Lean Left (Java/MC key Q)
 void onLeft(std::string_view, pl::modmenu::ButtonEvent event, float) {
     using E = pl::modmenu::ButtonEvent;
     auto& m = LeanModule::get();
@@ -51,7 +53,6 @@ void onLeft(std::string_view, pl::modmenu::ButtonEvent event, float) {
     if (event == E::Up) m.setLeanLeft(false);
 }
 
-// E = Lean Right (Java/MC key E)
 void onRight(std::string_view, pl::modmenu::ButtonEvent event, float) {
     using E = pl::modmenu::ButtonEvent;
     auto& m = LeanModule::get();
@@ -63,55 +64,63 @@ void onRight(std::string_view, pl::modmenu::ButtonEvent event, float) {
 
 void registerAll() {
     auto& cfg = LeanModule::get();
-    if (!cfg.m_showButtons) return;
 
-    // Prefer Q/E names; fall back to L/R filenames if user still has old pack
+    // 1) Register module FIRST (required before floating buttons)
+    const bool modOk =
+        pl::modmenu::ModuleBuilder(LeanModule::moduleId, LeanModule::name)
+            .modId(kModId)
+            .description("Hold Q/E on-screen to lean camera")
+            .defaultEnabled(true)
+            .registerModule();
+    LOGI("registerModule %s -> %s", LeanModule::moduleId, modOk ? "OK" : "FAIL");
+
+    if (!cfg.m_showButtons) {
+        LOGI("showButtons=false, skip buttons");
+        return;
+    }
+
     auto iconQ = loadAsset("button_iconQ.png");
     if (iconQ.empty()) iconQ = loadAsset("button_iconL.png");
-    auto iconQPressed = loadAsset("button_icon_pressedQ.png");
-    if (iconQPressed.empty()) iconQPressed = loadAsset("button_icon_pressedL.png");
-
     auto iconE = loadAsset("button_iconE.png");
     if (iconE.empty()) iconE = loadAsset("button_iconR.png");
-    auto iconEPressed = loadAsset("button_icon_pressedE.png");
-    if (iconEPressed.empty()) iconEPressed = loadAsset("button_icon_pressedR.png");
 
-    // Q = Left
+    // 2) Q = Lean Left — floating Hold button
     {
-        pl::modmenu::ButtonBuilder b{"taczlean.lean_left", "Lean Left (Q)"};
+        auto b = pl::modmenu::ButtonBuilder("taczlean.lean_left", "Lean Left (Q)");
         b.moduleId(LeanModule::moduleId)
+            .modId(kModId)
             .label("Q")
+            .androidKeyCode(45) // KEYCODE_Q
             .behavior(pl::modmenu::ButtonBehavior::Hold)
             .defaultVisible(true)
             .onEvent(onLeft);
-        if (!iconQ.empty()) b.pngIcon(iconQ, true);
-        if (!b.registerButton()) {
-            LOGI("register lean_left (Q) failed");
-        } else {
-            LOGI("lean_left (Q) registered");
-        }
+        if (!iconQ.empty()) b.pngIcon(iconQ, /*keepAspect=*/true);
+        const bool ok = b.registerButton();
+        LOGI("registerButton Q (left) -> %s", ok ? "OK" : "FAIL");
+        if (!ok) LOGE("ButtonBuilder lean_left failed — check moduleId/modId");
     }
 
-    // E = Right
+    // 3) E = Lean Right
     {
-        pl::modmenu::ButtonBuilder b{"taczlean.lean_right", "Lean Right (E)"};
+        auto b = pl::modmenu::ButtonBuilder("taczlean.lean_right", "Lean Right (E)");
         b.moduleId(LeanModule::moduleId)
+            .modId(kModId)
             .label("E")
+            .androidKeyCode(33) // KEYCODE_E
             .behavior(pl::modmenu::ButtonBehavior::Hold)
             .defaultVisible(true)
             .onEvent(onRight);
-        if (!iconE.empty()) b.pngIcon(iconE, true);
-        if (!b.registerButton()) {
-            LOGI("register lean_right (E) failed");
-        } else {
-            LOGI("lean_right (E) registered");
-        }
+        if (!iconE.empty()) b.pngIcon(iconE, /*keepAspect=*/true);
+        const bool ok = b.registerButton();
+        LOGI("registerButton E (right) -> %s", ok ? "OK" : "FAIL");
+        if (!ok) LOGE("ButtonBuilder lean_right failed");
     }
 }
 
 void unregisterAll() {
     pl::modmenu::unregisterButton("taczlean.lean_left");
     pl::modmenu::unregisterButton("taczlean.lean_right");
+    pl::modmenu::unregisterModule(LeanModule::moduleId);
 }
 
 } // namespace taczlean::buttons
