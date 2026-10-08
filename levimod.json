@@ -1,0 +1,7 @@
+{
+  "name": "TaczLean",
+  "version": "1.0.0",
+  "description": "TACZ-style hold lean (camera roll) for Levi Launcher",
+  "author": "port",
+  "minecraft": ["1.26.50", "1.26.52"]
+}
