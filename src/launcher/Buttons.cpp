@@ -48,7 +48,6 @@ void onLeft(std::string_view, pl::modmenu::ButtonEvent event, float) {
         if (event == E::Down) m.onButtonLeft(true);
         if (event == E::Up) m.onButtonLeft(false);
     } else {
-        // Toggle: fire on Down only
         if (event == E::Down) m.onButtonLeft(true);
     }
 }
@@ -64,27 +63,50 @@ void onRight(std::string_view, pl::modmenu::ButtonEvent event, float) {
     }
 }
 
+void onConfigChanged(std::string_view /*moduleId*/, std::string_view key,
+                     std::string_view value) {
+    auto& m = LeanModule::get();
+    const std::string k{key};
+    const std::string v{value};
+    try {
+        if (k == "maxLeanDeg") m.m_maxLeanDeg = std::stof(v);
+        else if (k == "lateralOffset") m.m_lateralOffset = std::stof(v);
+        else if (k == "smoothFactor") m.m_smoothFactor = std::stof(v);
+        else if (k == "holdMode") m.m_holdMode = (v == "true" || v == "1");
+        else if (k == "enableLateral") m.m_enableLateral = (v == "true" || v == "1");
+        else if (k == "enableRoll") m.m_enableRoll = (v == "true" || v == "1");
+        LOGI("config %s = %s", k.c_str(), v.c_str());
+    } catch (...) {
+    }
+}
+
 } // namespace
 
 void registerAll() {
     auto& cfg = LeanModule::get();
 
-    // Module + settings in Levi Mod Menu
     auto mb = pl::modmenu::ModuleBuilder(LeanModule::moduleId, LeanModule::name);
     mb.modId(kModId)
         .description("Lean: camera roll + lateral peek")
         .defaultEnabled(true)
-        .config("maxLeanDeg", "Max Lean Degrees", pl::modmenu::ConfigType::Slider,
+        .onConfigChanged(onConfigChanged)
+        .config("maxLeanDeg", "Max Lean Degrees",
+                pl::modmenu::ConfigType::SliderFloat,
                 std::to_string(cfg.m_maxLeanDeg), "5", "45")
-        .config("lateralOffset", "Lateral Offset (blocks)", pl::modmenu::ConfigType::Slider,
+        .config("lateralOffset", "Lateral Offset (blocks)",
+                pl::modmenu::ConfigType::SliderFloat,
                 std::to_string(cfg.m_lateralOffset), "0.05", "0.6")
-        .config("smoothFactor", "Smooth Factor", pl::modmenu::ConfigType::Slider,
+        .config("smoothFactor", "Smooth Factor",
+                pl::modmenu::ConfigType::SliderFloat,
                 std::to_string(cfg.m_smoothFactor), "0.05", "1.0")
-        .config("holdMode", "Hold Mode (off=Toggle)", pl::modmenu::ConfigType::Toggle,
+        .config("holdMode", "Hold Mode (off=Toggle)",
+                pl::modmenu::ConfigType::Toggle,
                 cfg.m_holdMode ? "true" : "false")
-        .config("enableLateral", "Enable Lateral Peek", pl::modmenu::ConfigType::Toggle,
+        .config("enableLateral", "Enable Lateral Peek",
+                pl::modmenu::ConfigType::Toggle,
                 cfg.m_enableLateral ? "true" : "false")
-        .config("enableRoll", "Enable Camera Roll", pl::modmenu::ConfigType::Toggle,
+        .config("enableRoll", "Enable Camera Roll",
+                pl::modmenu::ConfigType::Toggle,
                 cfg.m_enableRoll ? "true" : "false");
     LOGI("registerModule -> %s", mb.registerModule() ? "OK" : "FAIL");
 
