@@ -14,9 +14,9 @@ constexpr std::uintptr_t kPosXOffset     = 0x38;
 constexpr std::uintptr_t kPosYOffset     = 0x3C;
 constexpr std::uintptr_t kPosZOffset     = 0x40;
 
-constexpr std::uintptr_t kPlayerActorOffset     = 0x18;
-constexpr std::uintptr_t kActorBodyRollOffset    = 0x138;
-constexpr std::uintptr_t kActorVisualOffset     = 0x140;
+constexpr std::uintptr_t kPlayerActorOffset = 0x18;
+constexpr std::uintptr_t kRotZOffset        = 0x118;
+constexpr std::uintptr_t kRenderRotZOffset  = 0x11C;
 
 struct Quat { float x, y, z, w; };
 struct Vec3 { float x, y, z; };
@@ -144,16 +144,23 @@ void LeanModule::applyThirdPersonLean(void* cameraComponent) {
     if (!cameraComponent) return;
 
     auto* base = reinterpret_cast<char*>(cameraComponent);
-    auto** playerPtr = reinterpret_cast<char**>(base + kPlayerActorOffset);
-    if (!playerPtr || !*playerPtr) return;
+    
+    for (size_t offset = 0x0; offset <= 0x80; offset += sizeof(void*)) {
+        auto** ptrCandidate = reinterpret_cast<char**>(base + offset);
+        if (!ptrCandidate || !*ptrCandidate) continue;
 
-    char* actor = *playerPtr;
+        char* possibleActor = *ptrCandidate;
+        if (reinterpret_cast<uintptr_t>(possibleActor) < 0x10000000) continue;
 
-    auto* bodyRoll = reinterpret_cast<float*>(actor + kActorBodyRollOffset);
-    *bodyRoll = m_currentAngle;
+        auto* rotZ = reinterpret_cast<float*>(possibleActor + kRotZOffset);
+        auto* renderRotZ = reinterpret_cast<float*>(possibleActor + kRenderRotZOffset);
 
-    auto* visualOffset = reinterpret_cast<float*>(actor + kActorVisualOffset);
-    *visualOffset = -m_currentLateral;
+        if (std::isfinite(*rotZ) && std::fabs(*rotZ) < 360.0f) {
+            *rotZ = m_currentAngle;
+            *renderRotZ = m_currentAngle;
+            break;
+        }
+    }
 }
 
 void LeanModule::onCameraBlend(void* cameraComponent, float /*dt*/) {
