@@ -75,6 +75,10 @@ void onConfigChanged(std::string_view /*moduleId*/, std::string_view key,
         else if (k == "holdMode") m.m_holdMode = (v == "true" || v == "1");
         else if (k == "enableLateral") m.m_enableLateral = (v == "true" || v == "1");
         else if (k == "enableRoll") m.m_enableRoll = (v == "true" || v == "1");
+        else if (k == "bodyLeanEnabled") m.m_bodyLeanEnabled = (v == "true" || v == "1");
+        else if (k == "headScale") m.m_headScale = std::stof(v);
+        else if (k == "bodyScale") m.m_bodyScale = std::stof(v);
+        else if (k == "armScale") m.m_armScale = std::stof(v);
         LOGI("config %s = %s", k.c_str(), v.c_str());
     } catch (...) {
     }
@@ -107,7 +111,19 @@ void registerAll() {
                 cfg.m_enableLateral ? "true" : "false")
         .config("enableRoll", "Enable Camera Roll",
                 pl::modmenu::ConfigType::Toggle,
-                cfg.m_enableRoll ? "true" : "false");
+                cfg.m_enableRoll ? "true" : "false")
+        .config("bodyLeanEnabled", "Body Part Lean (head/torso/arms)",
+                pl::modmenu::ConfigType::Toggle,
+                cfg.m_bodyLeanEnabled ? "true" : "false")
+        .config("headScale", "Body: Head Scale",
+                pl::modmenu::ConfigType::SliderFloat,
+                std::to_string(cfg.m_headScale), "0.0", "2.0")
+        .config("bodyScale", "Body: Torso Scale",
+                pl::modmenu::ConfigType::SliderFloat,
+                std::to_string(cfg.m_bodyScale), "0.0", "2.0")
+        .config("armScale", "Body: Arms Scale",
+                pl::modmenu::ConfigType::SliderFloat,
+                std::to_string(cfg.m_armScale), "0.0", "2.0");
     LOGI("registerModule -> %s", mb.registerModule() ? "OK" : "FAIL");
 
     if (!cfg.m_showButtons) return;
@@ -124,25 +140,25 @@ void registerAll() {
         auto b = pl::modmenu::ButtonBuilder("taczlean.lean_left", "Lean Left");
         b.moduleId(LeanModule::moduleId)
             .modId(kModId)
-            .label("Z")
+            .label("C")
             .androidKeyCode(0)
             .behavior(behavior)
             .defaultVisible(true)
             .onEvent(onLeft);
         if (!iconLeft.empty()) b.pngIcon(iconLeft, true);
-        LOGI("btn Z -> %s", b.registerButton() ? "OK" : "FAIL");
+        LOGI("btn C (lean left) -> %s", b.registerButton() ? "OK" : "FAIL");
     }
     {
         auto b = pl::modmenu::ButtonBuilder("taczlean.lean_right", "Lean Right");
         b.moduleId(LeanModule::moduleId)
             .modId(kModId)
-            .label("C")
+            .label("Z")
             .androidKeyCode(0)
             .behavior(behavior)
             .defaultVisible(true)
             .onEvent(onRight);
         if (!iconRight.empty()) b.pngIcon(iconRight, true);
-        LOGI("btn C -> %s", b.registerButton() ? "OK" : "FAIL");
+        LOGI("btn Z (lean right) -> %s", b.registerButton() ? "OK" : "FAIL");
     }
 }
 

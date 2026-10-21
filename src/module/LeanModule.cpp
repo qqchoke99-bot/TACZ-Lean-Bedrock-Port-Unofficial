@@ -3,9 +3,13 @@
 
 #include <cameraoverhaul/memory/Signatures.hpp>
 
+#include <android/log.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "TaczLean", __VA_ARGS__)
 
 namespace {
 
@@ -71,6 +75,20 @@ void cameraBlendHook(void* component, void* blendState, float factor) {
     taczlean::LeanModule::get().onCameraBlend(component, 1.f / 60.f);
 }
 
+// Forwarding-only hook for the (previously unused) NormalTick signature.
+// Declared with the full 8 register-argument slots so the original call's
+// arguments are never clobbered; it must not disturb the game call.
+using NormalTickFn = void (*)(void*, void*, void*, void*, void*, void*, void*, void*);
+NormalTickFn g_origNormalTick = nullptr;
+std::uint64_t s_bodyTickCount = 0;
+
+void normalTickHook(void* a0, void* a1, void* a2, void* a3,
+                    void* a4, void* a5, void* a6, void* a7) {
+    if (g_origNormalTick)
+        g_origNormalTick(a0, a1, a2, a3, a4, a5, a6, a7);
+    taczlean::LeanModule::get().onBodyTick();
+}
+
 } // namespace
 
 namespace taczlean {
@@ -84,11 +102,30 @@ void LeanModule::init() {
     if (m_hooked) return;
     const auto addr = cameraoverhaul::memory::resolve(
         cameraoverhaul::memory::SignatureId::CameraBlendSystemTick);
-    if (!addr) return;
-    if (cameraoverhaul::hooks::install(reinterpret_cast<void*>(addr),
+    if (addr &&
+        cameraoverhaul::hooks::install(reinterpret_cast<void*>(addr),
                                        reinterpret_cast<void*>(cameraBlendHook),
                                        reinterpret_cast<void**>(&g_orig))) {
         m_hooked = true;
+    }
+
+    // Body tick source: independent of the camera hook so body-part lean can
+    // run (and be verified via logcat) even if the camera signature drifts.
+    if (!m_tickHooked) {
+        const auto tickAddr = cameraoverhaul::memory::resolve(
+            cameraoverhaul::memory::SignatureId::NormalTick);
+        if (tickAddr) {
+            m_tickHooked = cameraoverhaul::hooks::install(
+                reinterpret_cast<void*>(tickAddr),
+                reinterpret_cast<void*>(normalTickHook),
+                reinterpret_cast<void**>(&g_origNormalTick)) != nullptr;
+            if (m_tickHooked)
+                LOGI("NormalTick hooked @ 0x%lx", static_cast<unsigned long>(tickAddr));
+            else
+                LOGI("NormalTick hook install failed");
+        } else {
+            LOGI("NormalTick signature not resolved");
+        }
     }
 }
 
@@ -98,6 +135,18 @@ void LeanModule::shutdown() {
     m_toggleLeft = m_toggleRight = false;
     m_targetAngle = m_currentAngle = 0.f;
     m_targetLateral = m_currentLateral = 0.f;
+    m_bodyLogRequested = false;
+    m_bodyLogCooldown = 0;
+    s_bodyTickCount = 0;
+}
+
+void LeanModule::onBodyTick() {
+    ++s_bodyTickCount;
+    // First call confirms the hook fires; afterwards keep it quiet (1 line
+    // per ~2400 calls) so logcat stays readable.
+    if (s_bodyTickCount == 1 || (s_bodyTickCount % 2400) == 0)
+        LOGI("body tick alive, calls=%llu",
+             static_cast<unsigned long long>(s_bodyTickCount));
 }
 
 void LeanModule::setLeanLeft(bool held) { m_left = held; }
@@ -130,20 +179,42 @@ void LeanModule::onButtonRight(bool down) {
 void LeanModule::updateTargets() {
     float ang = 0.f;
     float lat = 0.f;
-    // Position must move the same visual direction as the roll tilt.
-    // (angle sign and world-right vector are opposite in this camera space)
     if (m_left.load() && !m_right.load()) {
         ang = -m_maxLeanDeg;
-        lat = m_lateralOffset;
+        lat = -m_lateralOffset;
     } else if (m_right.load() && !m_left.load()) {
         ang = m_maxLeanDeg;
-        lat = -m_lateralOffset;
+        lat = m_lateralOffset;
     }
+    if (ang != m_targetAngle || lat != m_targetLateral)
+        m_bodyLogRequested = true;
     m_targetAngle = ang;
     m_targetLateral = lat;
 }
 
 void LeanModule::applyLateralOnly(void*) {}
+
+void LeanModule::logBodyState() {
+    if (m_bodyLogRequested) {
+        m_bodyLogRequested = false;
+        m_bodyLogCooldown = 30;
+        LOGI("body lean target: head %.1f / torso %.1f / arms %.1f deg, lateral %.3f",
+             static_cast<double>(headLeanDeg()), static_cast<double>(bodyLeanDeg()),
+             static_cast<double>(armLeanDeg()), static_cast<double>(m_targetLateral));
+        return;
+    }
+    if (m_bodyLogCooldown > 0) {
+        --m_bodyLogCooldown;
+        return;
+    }
+    if (std::fabs(m_currentAngle) > 0.5f) {
+        m_bodyLogCooldown = 30; // ~0.5 s between progress lines while leaning
+        LOGI("body lean cur=%.1f deg: head %.1f / torso %.1f / arms %.1f, lateral %.3f",
+             static_cast<double>(m_currentAngle), static_cast<double>(headLeanDeg()),
+             static_cast<double>(bodyLeanDeg()), static_cast<double>(armLeanDeg()),
+             static_cast<double>(m_currentLateral));
+    }
+}
 
 void LeanModule::onCameraBlend(void* cameraComponent, float /*dt*/) {
     if (!m_enabled || !cameraComponent) return;
@@ -157,6 +228,11 @@ void LeanModule::onCameraBlend(void* cameraComponent, float /*dt*/) {
         m_currentAngle = 0.f;
     if (std::fabs(m_currentLateral) < 1e-5f && std::fabs(m_targetLateral) < 1e-5f)
         m_currentLateral = 0.f;
+
+    // Body-part lean: same smoothed state, per-part degrees derived from
+    // Max Lean Degrees via the part scales. (Renderer application comes in a
+    // later batch; for now the values are computed and logged for verification.)
+    if (m_bodyLeanEnabled) logBodyState();
 
     auto* base = reinterpret_cast<char*>(cameraComponent);
 
@@ -208,6 +284,10 @@ void LeanModule::loadConfig(const nlohmann::json& j) {
     gb("enableLateral", m_enableLateral);
     gb("holdMode", m_holdMode);
     gb("showButtons", m_showButtons);
+    gb("bodyLeanEnabled", m_bodyLeanEnabled);
+    gf("headScale", m_headScale);
+    gf("bodyScale", m_bodyScale);
+    gf("armScale", m_armScale);
 }
 
 void LeanModule::saveConfig(nlohmann::json& j) const {
@@ -220,6 +300,10 @@ void LeanModule::saveConfig(nlohmann::json& j) const {
     j["enableLateral"] = m_enableLateral;
     j["holdMode"] = m_holdMode;
     j["showButtons"] = m_showButtons;
+    j["bodyLeanEnabled"] = m_bodyLeanEnabled;
+    j["headScale"] = m_headScale;
+    j["bodyScale"] = m_bodyScale;
+    j["armScale"] = m_armScale;
 }
 
 } // namespace taczlean

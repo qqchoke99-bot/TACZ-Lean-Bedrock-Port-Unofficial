@@ -3,7 +3,9 @@
 Port of **taczleaning 1.0** (Nwkey) — **lean system only**.
 
 ## Features
-- Hold **Q** (left) / **E** (right) on-screen buttons → camera rolls left/right
+- Hold **C** (left) / **Z** (right) on-screen buttons → camera rolls left/right
+- Body-part lean state (head / torso / both arms) driven by the same Max Lean
+  Degrees, Lateral Offset and Smooth Factor (`bodyLeanEnabled` + per-part scales)
 - Values from Java: max lean **17°**, smooth **0.25**, FP roll ≈ 1:1
 - Same `CameraBlendSystemTick` hook family as CameraOverhaul (1.26.50+)
 
