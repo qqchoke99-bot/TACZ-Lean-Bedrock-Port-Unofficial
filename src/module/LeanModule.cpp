@@ -200,8 +200,8 @@ void LeanModule::onRegisterPart(void* owner, void* pair, const char* name,
         std::snprintf(&hex[i * 2], 3, "%02x", p[i]);
     hex[0x50 * 2] = '\0';
 
-    void* pair2 = pair ? *static_cast<void**>(static_cast<char*>(pair) + 8) : nullptr;
-    void* factory = pair2 ? *static_cast<void**>(static_cast<char*>(pair2) + 0x28) : nullptr;
+    void* pair2 = pair ? *reinterpret_cast<void* const*>(static_cast<const char*>(pair) + 8) : nullptr;
+    void* factory = pair2 ? *reinterpret_cast<void* const*>(static_cast<const char*>(pair2) + 0x28) : nullptr;
 
     LOGI("part[%llu] '%.*s' owner=0x%lx pair2=0x%lx factory=0x%lx ret=0x%lx dump=%s",
          static_cast<unsigned long long>(s_partCount), static_cast<int>(len), name,
