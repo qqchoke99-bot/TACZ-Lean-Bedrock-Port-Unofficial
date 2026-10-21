@@ -84,7 +84,10 @@ struct TrackedPart {
     char  name[16];
 };
 static std::vector<TrackedPart> g_trackedParts;
+static std::vector<void*> g_snakeGroups; // groups containing left_arm/… parts
 static std::uint64_t g_sampleCount = 0;
+static bool g_worldSeen = false;
+static bool g_writeProbeLogged = false;
 static void* g_seenGroups[24] = {};
 static int   g_seenGroupCount = 0;
 
@@ -249,9 +252,12 @@ void LeanModule::shutdown() {
     m_bodyLogRequested = false;
     m_bodyLogCooldown = 0;
     s_bodyTickCount = 0;
-    // Reset batch-2 probe state so a re-enable starts a fresh capture.
+    // Reset batch-2/3 probe state so a re-enable starts a fresh capture.
     g_trackedParts.clear();
+    g_snakeGroups.clear();
     g_sampleCount = 0;
+    g_worldSeen = false;
+    g_writeProbeLogged = false;
     g_seenGroupCount = 0;
 }
 
@@ -327,6 +333,25 @@ void LeanModule::onRegisterPart(void* owner, void* pair, const char* name,
             g_trackedParts.push_back(tp);
         }
     }
+
+    // Snake groups = the 1.26 humanoid model family (left_arm/… members).
+    // The write probe touches only these; camelCase groups (villager-style)
+    // and mob-head singletons stay untouched.
+    if (std::memchr(name, '_', len) && pair2) {
+        bool seen = false;
+        for (void* g : g_snakeGroups)
+            if (g == pair2) { seen = true; break; }
+        if (!seen) g_snakeGroups.push_back(pair2);
+    }
+
+    // The sampling/write clock starts at the first part registration (world
+    // join), not at mod load — otherwise the window burns down in the menu.
+    if (!g_worldSeen) {
+        g_worldSeen = true;
+        s_bodyTickCount = 0;
+        g_sampleCount = 0;
+        probeFileLog("=== world join: sampling clock restarted ===");
+    }
 }
 
 void LeanModule::onBodyTick() {
@@ -342,7 +367,7 @@ void LeanModule::onBodyTick() {
     // fields that change between samples are the live animation targets;
     // static ones are geometry/pointers to leave alone.
     if (!g_trackedParts.empty() && (s_bodyTickCount % 10) == 0 &&
-        g_sampleCount < 20) {
+        g_sampleCount < 60) {
         ++g_sampleCount;
         for (const auto& tp : g_trackedParts) {
             char hex[0x48 * 2 + 2];
@@ -353,8 +378,8 @@ void LeanModule::onBodyTick() {
                          reinterpret_cast<unsigned long>(tp.addr),
                          reinterpret_cast<unsigned long>(tp.group), hex);
         }
-        if (g_sampleCount == 20)
-            probeFileLog("=== sampling complete (20 samples) ===");
+        if (g_sampleCount == 60)
+            probeFileLog("=== sampling complete (60 samples) ===");
     }
 }
 
@@ -440,6 +465,33 @@ void LeanModule::onCameraBlend(void* cameraComponent, float /*dt*/) {
         m_currentAngle = 0.f;
     if (std::fabs(m_currentLateral) < 1e-5f && std::fabs(m_targetLateral) < 1e-5f)
         m_currentLateral = 0.f;
+
+    // Batch-3 write probe: lean the tracked humanoid parts by writing the
+    // smoothed angle into rotation-Z (radians @ +0x48; layout proven by the
+    // batch-2 dumps: 0x40/0x44/0x48 = rot X/Y/Z radians — both arms carried
+    // exactly 25° = 0.4363 rad — and 0x4c = constant 1.0). The zone is
+    // verified pointer-free across all 44 captured parts. Legs stay planted.
+    if (m_bodyLeanEnabled && !g_snakeGroups.empty()) {
+        const float leanRad = m_currentAngle * 3.14159265f / 180.f;
+        for (const auto& tp : g_trackedParts) {
+            bool snakeGroup = false;
+            for (void* g : g_snakeGroups)
+                if (g == tp.group) { snakeGroup = true; break; }
+            if (!snakeGroup) continue;
+            if (std::strstr(tp.name, "leg")) continue;
+            float k = m_bodyScale;
+            if (std::strstr(tp.name, "arm")) k = m_armScale;
+            else if (std::strcmp(tp.name, "head") == 0) k = m_headScale;
+            *reinterpret_cast<float*>(
+                reinterpret_cast<unsigned char*>(tp.addr) + 0x48) = leanRad * k;
+        }
+        if (!g_writeProbeLogged) {
+            g_writeProbeLogged = true;
+            probeFileLog("write probe active: parts=%zu angle=%.2f deg",
+                         g_trackedParts.size(),
+                         static_cast<double>(m_currentAngle));
+        }
+    }
 
     // Body-part lean: same smoothed state, per-part degrees derived from
     // Max Lean Degrees via the part scales. (Renderer application comes in a
