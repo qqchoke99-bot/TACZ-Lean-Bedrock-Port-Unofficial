@@ -7,11 +7,53 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "TaczLean", __VA_ARGS__)
+
+// File-based probe log. Android blocks Termux (and every other app) from
+// reading other apps' logcat, so logcat-only probing produced nothing on this
+// device. The probe therefore writes directly to shared storage: Download
+// first, then the launcher's games dir (the game can write there — worlds
+// live there — and Termux can read it), then the app-specific external dir.
+static void probeFileLog(const char* fmt, ...) {
+    static int s_okPath = -1; // -1 undetermined, 0..n chosen, -2 none work
+    if (s_okPath == -2) return;
+    static const char* const kPaths[] = {
+        "/sdcard/Download/taczlean_probe.log",
+        "/sdcard/games/org.levimc/taczlean_probe.log",
+        "/sdcard/Android/data/com.mojang.minecraftpe/files/taczlean_probe.log",
+    };
+    static constexpr int kPathCount =
+        static_cast<int>(sizeof(kPaths) / sizeof(kPaths[0]));
+    if (s_okPath == -1) {
+        for (int i = 0; i < kPathCount; ++i) {
+            if (FILE* t = std::fopen(kPaths[i], "a")) {
+                std::fclose(t);
+                s_okPath = i;
+                break;
+            }
+        }
+        if (s_okPath == -1) { s_okPath = -2; return; }
+        // One-time marker naming the accepted path.
+        FILE* m = std::fopen(kPaths[s_okPath], "a");
+        if (m) {
+            std::fprintf(m, "[probe] using path: %s\n", kPaths[s_okPath]);
+            std::fclose(m);
+        }
+    }
+    FILE* f = std::fopen(kPaths[s_okPath], "a");
+    if (!f) return;
+    va_list ap;
+    va_start(ap, fmt);
+    std::vfprintf(f, fmt, ap);
+    va_end(ap);
+    std::fputc('\n', f);
+    std::fclose(f);
+}
 
 namespace {
 
@@ -159,6 +201,10 @@ void LeanModule::init() {
             LOGI("RegisterModelPart signature not resolved");
         }
     }
+
+    // Session marker in the file log: proves the mod loaded even if no
+    // parts ever register. The helper also stamps which path it accepted.
+    probeFileLog("=== TaczLean session start ===");
 }
 
 void LeanModule::shutdown() {
@@ -209,6 +255,12 @@ void LeanModule::onRegisterPart(void* owner, void* pair, const char* name,
          reinterpret_cast<unsigned long>(pair2),
          reinterpret_cast<unsigned long>(factory),
          reinterpret_cast<unsigned long>(result), hex);
+    probeFileLog("part[%llu] '%.*s' owner=0x%lx pair2=0x%lx factory=0x%lx ret=0x%lx dump=%s",
+                 static_cast<unsigned long long>(s_partCount), static_cast<int>(len), name,
+                 reinterpret_cast<unsigned long>(owner),
+                 reinterpret_cast<unsigned long>(pair2),
+                 reinterpret_cast<unsigned long>(factory),
+                 reinterpret_cast<unsigned long>(result), hex);
 }
 
 void LeanModule::onBodyTick() {
