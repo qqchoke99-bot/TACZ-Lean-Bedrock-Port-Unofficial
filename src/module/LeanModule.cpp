@@ -251,10 +251,13 @@ void LeanModule::updateTargets() {
     float ang = 0.f;
     float lat = 0.f;
     if (m_left.load() && !m_right.load()) {
-        ang = -m_maxLeanDeg;
+        // Native camera API renders roll with the opposite sign vs. the
+        // original Java mod, so "lean left" must emit a POSITIVE angle
+        // (negative rendered as a right roll in-game).
+        ang = m_maxLeanDeg;
         lat = -m_lateralOffset;
     } else if (m_right.load() && !m_left.load()) {
-        ang = m_maxLeanDeg;
+        ang = -m_maxLeanDeg;
         lat = m_lateralOffset;
     }
     if (ang != m_targetAngle || lat != m_targetLateral)
