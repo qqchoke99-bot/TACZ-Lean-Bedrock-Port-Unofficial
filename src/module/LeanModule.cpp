@@ -370,9 +370,9 @@ void LeanModule::onBodyTick() {
         g_sampleCount < 60) {
         ++g_sampleCount;
         for (const auto& tp : g_trackedParts) {
-            char hex[0x48 * 2 + 2];
+            char hex[0x68 * 2 + 2];
             hexDumpToBuf(static_cast<const unsigned char*>(tp.addr) + 0x18,
-                         0x48, hex, sizeof(hex));
+                         0x68, hex, sizeof(hex));
             probeFileLog("s%02u '%s'@0x%lx g=0x%lx %s",
                          static_cast<unsigned>(g_sampleCount), tp.name,
                          reinterpret_cast<unsigned long>(tp.addr),
@@ -466,11 +466,14 @@ void LeanModule::onCameraBlend(void* cameraComponent, float /*dt*/) {
     if (std::fabs(m_currentLateral) < 1e-5f && std::fabs(m_targetLateral) < 1e-5f)
         m_currentLateral = 0.f;
 
-    // Batch-3 write probe: lean the tracked humanoid parts by writing the
-    // smoothed angle into rotation-Z (radians @ +0x48; layout proven by the
-    // batch-2 dumps: 0x40/0x44/0x48 = rot X/Y/Z radians — both arms carried
-    // exactly 25° = 0.4363 rad — and 0x4c = constant 1.0). The zone is
-    // verified pointer-free across all 44 captured parts. Legs stay planted.
+    // Batch-4 write probe: the batch-3 round proved +0x48 is read as
+    // TRANSLATION (body shifted, no tilt). Full float map shows:
+    //   0x40 pos vec4 (w=1 @0x4c) · 0x58/0x5c per-part pivot constants ·
+    //   0x60/0x64/0x68 all-zero vec3 (rotation candidate) · 0x70 scale(1,1,1).
+    // Write the lean into ONE candidate axis per part type so whatever
+    // moves identifies both the field and its axis semantics:
+    //   head → +0x64 (y = head turn) · body → +0x60 (x = bow) ·
+    //   arms → +0x68 (z = sideways swing). Legs stay planted.
     if (m_bodyLeanEnabled && !g_snakeGroups.empty()) {
         const float leanRad = m_currentAngle * 3.14159265f / 180.f;
         for (const auto& tp : g_trackedParts) {
@@ -479,15 +482,18 @@ void LeanModule::onCameraBlend(void* cameraComponent, float /*dt*/) {
                 if (g == tp.group) { snakeGroup = true; break; }
             if (!snakeGroup) continue;
             if (std::strstr(tp.name, "leg")) continue;
-            float k = m_bodyScale;
-            if (std::strstr(tp.name, "arm")) k = m_armScale;
-            else if (std::strcmp(tp.name, "head") == 0) k = m_headScale;
-            *reinterpret_cast<float*>(
-                reinterpret_cast<unsigned char*>(tp.addr) + 0x48) = leanRad * k;
+            auto* p = reinterpret_cast<unsigned char*>(tp.addr);
+            if (std::strcmp(tp.name, "head") == 0) {
+                *reinterpret_cast<float*>(p + 0x64) = leanRad * m_headScale;
+            } else if (std::strcmp(tp.name, "body") == 0) {
+                *reinterpret_cast<float*>(p + 0x60) = leanRad * m_bodyScale;
+            } else if (std::strstr(tp.name, "arm")) {
+                *reinterpret_cast<float*>(p + 0x68) = leanRad * m_armScale;
+            }
         }
         if (!g_writeProbeLogged) {
             g_writeProbeLogged = true;
-            probeFileLog("write probe active: parts=%zu angle=%.2f deg",
+            probeFileLog("write probe v2 active: parts=%zu angle=%.2f deg",
                          g_trackedParts.size(),
                          static_cast<double>(m_currentAngle));
         }
@@ -504,7 +510,20 @@ void LeanModule::onCameraBlend(void* cameraComponent, float /*dt*/) {
     auto* qf = reinterpret_cast<float*>(base + kRotationOffset);
     Quat cur{qf[0], qf[1], qf[2], qf[3]};
     const float qlen = std::sqrt(cur.x * cur.x + cur.y * cur.y + cur.z * cur.z + cur.w * cur.w);
-    if (!(qlen > 0.5f && qlen < 1.5f)) return;
+    // Relaxed bounds: camera shake may briefly store unnormalized quats;
+    // normalize instead of bailing (bailing disabled the lean roll during
+    // shake). Rejections are logged so the next session reveals what shake
+    // actually writes.
+    if (!(qlen > 0.05f && qlen < 20.f)) {
+        static unsigned s_rejCount = 0;
+        if ((s_rejCount++ % 120) == 0) {
+            const auto* qb = reinterpret_cast<const unsigned*>(qf);
+            probeFileLog("quat rejected #%u: len=%.5f raw=%08x %08x %08x %08x",
+                         static_cast<unsigned>(s_rejCount),
+                         static_cast<double>(qlen), qb[0], qb[1], qb[2], qb[3]);
+        }
+        return;
+    }
     cur = quatNormalize(cur);
 
     // --- Position @ +0x38,+0x3c,+0x40 (from CameraBlendSystem copy) ---
