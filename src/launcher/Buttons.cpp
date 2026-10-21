@@ -137,7 +137,7 @@ void registerAll() {
                                          : pl::modmenu::ButtonBehavior::Toggle;
 
     {
-        auto b = pl::modmenu::ButtonBuilder("taczlean.lean_left", "Lean Left");
+        auto b = pl::modmenu::ButtonBuilder("taczlean.key.c", "Lean Left (C)");
         b.moduleId(LeanModule::moduleId)
             .modId(kModId)
             .label("C")
@@ -149,7 +149,7 @@ void registerAll() {
         LOGI("btn C (lean left) -> %s", b.registerButton() ? "OK" : "FAIL");
     }
     {
-        auto b = pl::modmenu::ButtonBuilder("taczlean.lean_right", "Lean Right");
+        auto b = pl::modmenu::ButtonBuilder("taczlean.key.z", "Lean Right (Z)");
         b.moduleId(LeanModule::moduleId)
             .modId(kModId)
             .label("Z")
@@ -165,6 +165,8 @@ void registerAll() {
 void unregisterAll() {
     pl::modmenu::unregisterButton("taczlean.lean_left");
     pl::modmenu::unregisterButton("taczlean.lean_right");
+    pl::modmenu::unregisterButton("taczlean.key.c");
+    pl::modmenu::unregisterButton("taczlean.key.z");
     pl::modmenu::unregisterModule(LeanModule::moduleId);
 }
 
