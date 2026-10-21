@@ -9,6 +9,7 @@ namespace cameraoverhaul::memory {
 enum class SignatureId : std::uint32_t {
     NormalTick,
     CameraBlendSystemTick,
+    RegisterModelPart,
     Count
 };
 

@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "TaczLean", __VA_ARGS__)
 
@@ -89,6 +91,17 @@ void normalTickHook(void* a0, void* a1, void* a2, void* a3,
     taczlean::LeanModule::get().onBodyTick();
 }
 
+// Probe hook: data-driven model part registration (owner, pair, name, len, arg).
+using RegisterPartFn = void* (*)(void*, void*, const char*, unsigned long long, void*);
+RegisterPartFn g_origRegisterPart = nullptr;
+
+void* registerPartHook(void* owner, void* pair, const char* name,
+                       unsigned long long len, void* arg) {
+    void* r = g_origRegisterPart(owner, pair, name, len, arg);
+    taczlean::LeanModule::get().onRegisterPart(owner, pair, name, len, r);
+    return r;
+}
+
 } // namespace
 
 namespace taczlean {
@@ -127,6 +140,25 @@ void LeanModule::init() {
             LOGI("NormalTick signature not resolved");
         }
     }
+
+    // Probe: part-name registration — tells us at runtime which model objects
+    // own the humanoid bones (head/body/arms) and their live addresses.
+    if (!m_partHooked) {
+        const auto partAddr = cameraoverhaul::memory::resolve(
+            cameraoverhaul::memory::SignatureId::RegisterModelPart);
+        if (partAddr) {
+            m_partHooked = cameraoverhaul::hooks::install(
+                reinterpret_cast<void*>(partAddr),
+                reinterpret_cast<void*>(registerPartHook),
+                reinterpret_cast<void**>(&g_origRegisterPart)) != nullptr;
+            if (m_partHooked)
+                LOGI("RegisterModelPart hooked @ 0x%lx", static_cast<unsigned long>(partAddr));
+            else
+                LOGI("RegisterModelPart hook install failed");
+        } else {
+            LOGI("RegisterModelPart signature not resolved");
+        }
+    }
 }
 
 void LeanModule::shutdown() {
@@ -138,6 +170,45 @@ void LeanModule::shutdown() {
     m_bodyLogRequested = false;
     m_bodyLogCooldown = 0;
     s_bodyTickCount = 0;
+}
+
+void LeanModule::onRegisterPart(void* owner, void* pair, const char* name,
+                                unsigned long long len, void* result) {
+    if (!name || len == 0 || len > 32) return;
+    static const char* const kInteresting[] = {
+        "head", "body", "rightArm", "leftArm", "rightLeg", "leftLeg",
+        "left_arm", "right_arm", "left_leg", "right_leg", "hat", "waist",
+    };
+    bool match = false;
+    for (const char* k : kInteresting) {
+        if (std::strlen(name) == len && std::memcmp(name, k, len) == 0) {
+            match = true;
+            break;
+        }
+    }
+    if (!match) return;
+
+    static std::uint64_t s_partCount = 0;
+    ++s_partCount;
+    // Log the first 40 matches in full; afterwards only every 200th.
+    if (s_partCount > 40 && (s_partCount % 200) != 0) return;
+
+    // owner object hex dump (first 0x50 bytes) — lets us locate rot/pos fields
+    char hex[0x50 * 2 + 1];
+    const auto* p = static_cast<const unsigned char*>(owner);
+    for (std::size_t i = 0; i < 0x50; ++i)
+        std::snprintf(&hex[i * 2], 3, "%02x", p[i]);
+    hex[0x50 * 2] = '\0';
+
+    void* pair2 = pair ? *static_cast<void**>(static_cast<char*>(pair) + 8) : nullptr;
+    void* factory = pair2 ? *static_cast<void**>(static_cast<char*>(pair2) + 0x28) : nullptr;
+
+    LOGI("part[%llu] '%.*s' owner=0x%lx pair2=0x%lx factory=0x%lx ret=0x%lx dump=%s",
+         static_cast<unsigned long long>(s_partCount), static_cast<int>(len), name,
+         reinterpret_cast<unsigned long>(owner),
+         reinterpret_cast<unsigned long>(pair2),
+         reinterpret_cast<unsigned long>(factory),
+         reinterpret_cast<unsigned long>(result), hex);
 }
 
 void LeanModule::onBodyTick() {

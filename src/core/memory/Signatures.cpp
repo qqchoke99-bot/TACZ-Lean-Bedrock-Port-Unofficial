@@ -11,6 +11,10 @@ std::array<std::uintptr_t, SignatureCount> addresses{};
 const std::array<SignatureDefinition, SignatureCount> definitions{{
     SignatureDefinition{SignatureId::NormalTick, "? ? ? FC ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? A9 ? ? ? 91 ? ? ? D1 54 D0 3B D5 F3 03 00 AA ? ? ? F9 ? ? ? F8 ? ? ? 39"},
     SignatureDefinition{SignatureId::CameraBlendSystemTick, "? ? ? D1 ? ? ? 6D ? ? ? 6D ? ? ? 6D ? ? ? 6D ? ? ? A9 ? ? ? F9 ? ? ? A9 ? ? ? A9 ? ? ? 91 55 D0 3B D5 F3 03 01 AA F4 03 00 AA ? ? ? F9 ? ? ? 91 ? ? ? 91"},
+    // Data-driven model part registration (name-keyed child add), 1.26.50/52:
+    // sub sp,#0xd0; stp x29..; mrs x25,TPIDR_EL0; mov x23,x1; mov x22,x0; ...
+    SignatureDefinition{SignatureId::RegisterModelPart,
+        "FF 43 03 D1 FD 7B 08 A9 FA 67 09 A9 F8 5F 0A A9 F6 57 0B A9 F4 4F 0C A9 FD 03 02 91 59 D0 3B D5 F7 03 01 AA F6 03 00 AA 28 17 40 F9 E0 03 02 AA E1 03 03 AA F3 03 04 AA F4 03 03 AA F5 03 02 AA"},
 }};
 }
 

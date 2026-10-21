@@ -35,6 +35,10 @@ public:
     // Per-tick driver invoked by the NormalTick forwarding hook.
     void onBodyTick();
 
+    // Probe: logs humanoid part registrations (owner object + memory dump).
+    void onRegisterPart(void* owner, void* pair, const char* name,
+                        unsigned long long len, void* result);
+
     void loadConfig(const nlohmann::json& j);
     void saveConfig(nlohmann::json& j) const;
 
@@ -67,6 +71,7 @@ private:
     float m_currentLateral{0.f};
     bool m_hooked{false};
     bool m_tickHooked{false};
+    bool m_partHooked{false};
     // log throttling (only touched from the camera-blend thread)
     bool m_bodyLogRequested{false};
     int  m_bodyLogCooldown{0};
