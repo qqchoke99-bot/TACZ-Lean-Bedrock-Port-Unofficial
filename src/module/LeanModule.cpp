@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "TaczLean", __VA_ARGS__)
 
@@ -19,33 +20,36 @@
 // device. The probe therefore writes directly to shared storage: Download
 // first, then the launcher's games dir (the game can write there — worlds
 // live there — and Termux can read it), then the app-specific external dir.
-static void probeFileLog(const char* fmt, ...) {
-    static int s_okPath = -1; // -1 undetermined, 0..n chosen, -2 none work
-    if (s_okPath == -2) return;
-    static const char* const kPaths[] = {
-        "/sdcard/Download/taczlean_probe.log",
-        "/sdcard/games/org.levimc/taczlean_probe.log",
-        "/sdcard/Android/data/com.mojang.minecraftpe/files/taczlean_probe.log",
-    };
-    static constexpr int kPathCount =
-        static_cast<int>(sizeof(kPaths) / sizeof(kPaths[0]));
-    if (s_okPath == -1) {
+static const char* const kProbePaths[] = {
+    "/sdcard/Download/taczlean_probe.log",
+    "/sdcard/games/org.levimc/taczlean_probe.log",
+    "/sdcard/Android/data/com.mojang.minecraftpe/files/taczlean_probe.log",
+};
+static int g_probePath = -1; // -1 undetermined, -2 none work
+
+static FILE* probeOpen(const char* mode) {
+    if (g_probePath == -2) return nullptr;
+    if (g_probePath == -1) {
+        constexpr int kPathCount =
+            static_cast<int>(sizeof(kProbePaths) / sizeof(kProbePaths[0]));
         for (int i = 0; i < kPathCount; ++i) {
-            if (FILE* t = std::fopen(kPaths[i], "a")) {
+            if (FILE* t = std::fopen(kProbePaths[i], "a")) {
                 std::fclose(t);
-                s_okPath = i;
+                g_probePath = i;
                 break;
             }
         }
-        if (s_okPath == -1) { s_okPath = -2; return; }
-        // One-time marker naming the accepted path.
-        FILE* m = std::fopen(kPaths[s_okPath], "a");
-        if (m) {
-            std::fprintf(m, "[probe] using path: %s\n", kPaths[s_okPath]);
+        if (g_probePath == -1) { g_probePath = -2; return nullptr; }
+        if (FILE* m = std::fopen(kProbePaths[g_probePath], "a")) {
+            std::fprintf(m, "[probe] using path: %s\n", kProbePaths[g_probePath]);
             std::fclose(m);
         }
     }
-    FILE* f = std::fopen(kPaths[s_okPath], "a");
+    return std::fopen(kProbePaths[g_probePath], mode);
+}
+
+static void probeFileLog(const char* fmt, ...) {
+    FILE* f = probeOpen("a");
     if (!f) return;
     va_list ap;
     va_start(ap, fmt);
@@ -54,6 +58,35 @@ static void probeFileLog(const char* fmt, ...) {
     std::fputc('\n', f);
     std::fclose(f);
 }
+
+// Truncate and start a fresh log per session so stale addresses from
+// previous runs don't pollute the analysis.
+static void probeFileReset() {
+    if (FILE* f = probeOpen("w")) {
+        std::fprintf(f, "=== TaczLean session start ===\n");
+        std::fclose(f);
+    }
+}
+
+static void hexDumpToBuf(const unsigned char* p, std::size_t n,
+                         char* out, std::size_t outCap) {
+    const std::size_t maxi = (outCap - 1) / 2;
+    if (n > maxi) n = maxi;
+    for (std::size_t i = 0; i < n; ++i)
+        std::snprintf(&out[i * 2], 3, "%02x", p[i]);
+    out[n * 2] = '\0';
+}
+
+// ---- Batch-2 probe state ----
+struct TrackedPart {
+    void* addr;
+    void* group; // pair2 (model instance container)
+    char  name[16];
+};
+static std::vector<TrackedPart> g_trackedParts;
+static std::uint64_t g_sampleCount = 0;
+static void* g_seenGroups[24] = {};
+static int   g_seenGroupCount = 0;
 
 namespace {
 
@@ -202,9 +235,9 @@ void LeanModule::init() {
         }
     }
 
-    // Session marker in the file log: proves the mod loaded even if no
-    // parts ever register. The helper also stamps which path it accepted.
-    probeFileLog("=== TaczLean session start ===");
+    // Fresh file log per session: proves the mod loaded even if no parts
+    // ever register, and drops stale data from previous runs.
+    probeFileReset();
 }
 
 void LeanModule::shutdown() {
@@ -216,11 +249,15 @@ void LeanModule::shutdown() {
     m_bodyLogRequested = false;
     m_bodyLogCooldown = 0;
     s_bodyTickCount = 0;
+    // Reset batch-2 probe state so a re-enable starts a fresh capture.
+    g_trackedParts.clear();
+    g_sampleCount = 0;
+    g_seenGroupCount = 0;
 }
 
 void LeanModule::onRegisterPart(void* owner, void* pair, const char* name,
                                 unsigned long long len, void* result) {
-    if (!name || len == 0 || len > 32) return;
+    if (!name || len == 0 || len > 15) return;
     static const char* const kInteresting[] = {
         "head", "body", "rightArm", "leftArm", "rightLeg", "leftLeg",
         "left_arm", "right_arm", "left_leg", "right_leg", "hat", "waist",
@@ -234,33 +271,62 @@ void LeanModule::onRegisterPart(void* owner, void* pair, const char* name,
     }
     if (!match) return;
 
-    static std::uint64_t s_partCount = 0;
-    ++s_partCount;
-    // Log the first 40 matches in full; afterwards only every 200th.
-    if (s_partCount > 40 && (s_partCount % 200) != 0) return;
-
-    // owner object hex dump (first 0x50 bytes) — lets us locate rot/pos fields
-    char hex[0x50 * 2 + 1];
-    const auto* p = static_cast<const unsigned char*>(owner);
-    for (std::size_t i = 0; i < 0x50; ++i)
-        std::snprintf(&hex[i * 2], 3, "%02x", p[i]);
-    hex[0x50 * 2] = '\0';
-
     void* pair2 = pair ? *reinterpret_cast<void* const*>(static_cast<const char*>(pair) + 8) : nullptr;
     void* factory = pair2 ? *reinterpret_cast<void* const*>(static_cast<const char*>(pair2) + 0x28) : nullptr;
 
-    LOGI("part[%llu] '%.*s' owner=0x%lx pair2=0x%lx factory=0x%lx ret=0x%lx dump=%s",
-         static_cast<unsigned long long>(s_partCount), static_cast<int>(len), name,
-         reinterpret_cast<unsigned long>(owner),
-         reinterpret_cast<unsigned long>(pair2),
-         reinterpret_cast<unsigned long>(factory),
-         reinterpret_cast<unsigned long>(result), hex);
+    static std::uint64_t s_partCount = 0;
+    ++s_partCount;
+
+    // Full 0x220-byte object dump to the file log — reveals rotation blocks,
+    // parent pointers, and everything else needed to pick safe write targets.
+    char hex[0x220 * 2 + 2];
+    hexDumpToBuf(static_cast<const unsigned char*>(owner), 0x220, hex, sizeof(hex));
     probeFileLog("part[%llu] '%.*s' owner=0x%lx pair2=0x%lx factory=0x%lx ret=0x%lx dump=%s",
                  static_cast<unsigned long long>(s_partCount), static_cast<int>(len), name,
                  reinterpret_cast<unsigned long>(owner),
                  reinterpret_cast<unsigned long>(pair2),
                  reinterpret_cast<unsigned long>(factory),
                  reinterpret_cast<unsigned long>(result), hex);
+
+    LOGI("part[%llu] '%.*s' owner=0x%lx pair2=0x%lx",
+         static_cast<unsigned long long>(s_partCount), static_cast<int>(len), name,
+         reinterpret_cast<unsigned long>(owner),
+         reinterpret_cast<unsigned long>(pair2));
+
+    // Snapshot each unique group container (model instance) once.
+    if (pair2) {
+        bool seen = false;
+        for (int i = 0; i < g_seenGroupCount; ++i)
+            if (g_seenGroups[i] == pair2) { seen = true; break; }
+        if (!seen &&
+            g_seenGroupCount < static_cast<int>(sizeof(g_seenGroups) / sizeof(g_seenGroups[0]))) {
+            g_seenGroups[g_seenGroupCount++] = pair2;
+            char ghex[0x80 * 2 + 2];
+            hexDumpToBuf(static_cast<const unsigned char*>(pair2), 0x80, ghex, sizeof(ghex));
+            probeFileLog("group 0x%lx dump=%s",
+                         reinterpret_cast<unsigned long>(pair2), ghex);
+        }
+    }
+
+    // Track humanoid parts for the periodic pose sampler. snake_case names
+    // (left_arm/…) belong to the 1.26 humanoid model; head/body are tracked
+    // too (mob heads add comparison data). Cap the tracker for safety.
+    bool tracked = std::memchr(name, '_', len) != nullptr;
+    if (!tracked && len == 4)
+        tracked = std::memcmp(name, "head", 4) == 0 || std::memcmp(name, "body", 4) == 0;
+    if (tracked && g_trackedParts.size() < 96) {
+        bool dup = false;
+        for (const auto& tp : g_trackedParts)
+            if (tp.addr == owner) { dup = true; break; }
+        if (!dup) {
+            TrackedPart tp{};
+            tp.addr = owner;
+            tp.group = pair2;
+            std::memcpy(tp.name, name, len);
+            tp.name[len] = '\0';
+            g_trackedParts.push_back(tp);
+        }
+    }
 }
 
 void LeanModule::onBodyTick() {
@@ -270,6 +336,26 @@ void LeanModule::onBodyTick() {
     if (s_bodyTickCount == 1 || (s_bodyTickCount % 2400) == 0)
         LOGI("body tick alive, calls=%llu",
              static_cast<unsigned long long>(s_bodyTickCount));
+
+    // Batch-2 probe: periodic snapshots of the pose region (0x18..0x5F) of
+    // every tracked humanoid part. 2 Hz for the first 20 samples (~10 s):
+    // fields that change between samples are the live animation targets;
+    // static ones are geometry/pointers to leave alone.
+    if (!g_trackedParts.empty() && (s_bodyTickCount % 10) == 0 &&
+        g_sampleCount < 20) {
+        ++g_sampleCount;
+        for (const auto& tp : g_trackedParts) {
+            char hex[0x48 * 2 + 2];
+            hexDumpToBuf(static_cast<const unsigned char*>(tp.addr) + 0x18,
+                         0x48, hex, sizeof(hex));
+            probeFileLog("s%02u '%s'@0x%lx g=0x%lx %s",
+                         static_cast<unsigned>(g_sampleCount), tp.name,
+                         reinterpret_cast<unsigned long>(tp.addr),
+                         reinterpret_cast<unsigned long>(tp.group), hex);
+        }
+        if (g_sampleCount == 20)
+            probeFileLog("=== sampling complete (20 samples) ===");
+    }
 }
 
 void LeanModule::setLeanLeft(bool held) { m_left = held; }
