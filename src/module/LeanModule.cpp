@@ -466,14 +466,15 @@ void LeanModule::onCameraBlend(void* cameraComponent, float /*dt*/) {
     if (std::fabs(m_currentLateral) < 1e-5f && std::fabs(m_targetLateral) < 1e-5f)
         m_currentLateral = 0.f;
 
-    // Batch-4 write probe: the batch-3 round proved +0x48 is read as
-    // TRANSLATION (body shifted, no tilt). Full float map shows:
-    //   0x40 pos vec4 (w=1 @0x4c) · 0x58/0x5c per-part pivot constants ·
-    //   0x60/0x64/0x68 all-zero vec3 (rotation candidate) · 0x70 scale(1,1,1).
-    // Write the lean into ONE candidate axis per part type so whatever
-    // moves identifies both the field and its axis semantics:
-    //   head → +0x64 (y = head turn) · body → +0x60 (x = bow) ·
-    //   arms → +0x68 (z = sideways swing). Legs stay planted.
+    // Batch-5: rotation-Z @ +0x48 RESTORED — batch-4 proved +0x60/0x64/0x68
+    // are dead fields (writes persisted in memory, renderer ignored them),
+    // while +0x48 is the only offset with a proven visual effect (the
+    // first-person movement the user wants kept). Batch-3 wrote the SAME
+    // angle to every part, which fanned the parts apart on their own pivots
+    // and read as a sideways shift instead of a lean. A lean needs the torso
+    // to lead: body gets the full angle, head/arms get half weight so the
+    // upper body tilts as one piece (children that inherit the torso
+    // transform over-rotate by design in batch 3). Legs stay planted.
     if (m_bodyLeanEnabled && !g_snakeGroups.empty()) {
         const float leanRad = m_currentAngle * 3.14159265f / 180.f;
         for (const auto& tp : g_trackedParts) {
@@ -482,18 +483,15 @@ void LeanModule::onCameraBlend(void* cameraComponent, float /*dt*/) {
                 if (g == tp.group) { snakeGroup = true; break; }
             if (!snakeGroup) continue;
             if (std::strstr(tp.name, "leg")) continue;
-            auto* p = reinterpret_cast<unsigned char*>(tp.addr);
-            if (std::strcmp(tp.name, "head") == 0) {
-                *reinterpret_cast<float*>(p + 0x64) = leanRad * m_headScale;
-            } else if (std::strcmp(tp.name, "body") == 0) {
-                *reinterpret_cast<float*>(p + 0x60) = leanRad * m_bodyScale;
-            } else if (std::strstr(tp.name, "arm")) {
-                *reinterpret_cast<float*>(p + 0x68) = leanRad * m_armScale;
-            }
+            float k = m_bodyScale;
+            if (std::strcmp(tp.name, "head") == 0) k = m_headScale * 0.5f;
+            else if (std::strstr(tp.name, "arm"))  k = m_armScale  * 0.5f;
+            *reinterpret_cast<float*>(
+                reinterpret_cast<unsigned char*>(tp.addr) + 0x48) = leanRad * k;
         }
         if (!g_writeProbeLogged) {
             g_writeProbeLogged = true;
-            probeFileLog("write probe v2 active: parts=%zu angle=%.2f deg",
+            probeFileLog("write probe v3 active: parts=%zu angle=%.2f deg",
                          g_trackedParts.size(),
                          static_cast<double>(m_currentAngle));
         }
