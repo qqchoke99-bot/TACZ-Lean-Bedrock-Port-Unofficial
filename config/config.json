@@ -7,5 +7,9 @@
   "enableRoll": true,
   "enableLateral": true,
   "holdMode": true,
-  "showButtons": true
+  "showButtons": true,
+  "bodyLeanEnabled": true,
+  "headScale": 1.0,
+  "bodyScale": 1.0,
+  "armScale": 1.0
 }
