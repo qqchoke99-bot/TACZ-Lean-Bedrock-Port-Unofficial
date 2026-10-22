@@ -362,17 +362,19 @@ void LeanModule::onBodyTick() {
         LOGI("body tick alive, calls=%llu",
              static_cast<unsigned long long>(s_bodyTickCount));
 
-    // Batch-2 probe: periodic snapshots of the pose region (0x18..0x5F) of
-    // every tracked humanoid part. 2 Hz for the first 20 samples (~10 s):
-    // fields that change between samples are the live animation targets;
-    // static ones are geometry/pointers to leave alone.
+    // Batch-6 probe: snapshots of the WHOLE object body (0x18..0x220) of
+    // every tracked humanoid part, 2 Hz for 60 samples (~30 s). Fields that
+    // change between samples are the live animation targets. Rounds 2-5 only
+    // ever sampled 0x18..0x7F and saw zero organic movement while walking —
+    // the live rotation storage must live beyond +0x80 (top candidate: the
+    // identity quat vec4 at +0x20c, present in all 44 captured parts).
     if (!g_trackedParts.empty() && (s_bodyTickCount % 10) == 0 &&
         g_sampleCount < 60) {
         ++g_sampleCount;
         for (const auto& tp : g_trackedParts) {
-            char hex[0x68 * 2 + 2];
+            char hex[0x208 * 2 + 2];
             hexDumpToBuf(static_cast<const unsigned char*>(tp.addr) + 0x18,
-                         0x68, hex, sizeof(hex));
+                         0x208, hex, sizeof(hex));
             probeFileLog("s%02u '%s'@0x%lx g=0x%lx %s",
                          static_cast<unsigned>(g_sampleCount), tp.name,
                          reinterpret_cast<unsigned long>(tp.addr),
@@ -466,15 +468,16 @@ void LeanModule::onCameraBlend(void* cameraComponent, float /*dt*/) {
     if (std::fabs(m_currentLateral) < 1e-5f && std::fabs(m_targetLateral) < 1e-5f)
         m_currentLateral = 0.f;
 
-    // Batch-5: rotation-Z @ +0x48 RESTORED — batch-4 proved +0x60/0x64/0x68
-    // are dead fields (writes persisted in memory, renderer ignored them),
-    // while +0x48 is the only offset with a proven visual effect (the
-    // first-person movement the user wants kept). Batch-3 wrote the SAME
-    // angle to every part, which fanned the parts apart on their own pivots
-    // and read as a sideways shift instead of a lean. A lean needs the torso
-    // to lead: body gets the full angle, head/arms get half weight so the
-    // upper body tilts as one piece (children that inherit the torso
-    // transform over-rotate by design in batch 3). Legs stay planted.
+    // Batch-6: LIVE-rotation candidate. Rounds 2-5 proved the renderer never
+    // reads 0x18..0x7F for animation (zero organic movement while walking) —
+    // the live pose must live beyond +0x80. Top structural candidate: the
+    // identity quat vec4 at +0x20c, (0,0,0,1) in ALL 44 captured parts.
+    // Compose the lean roll ONTO whatever rotation the part currently holds
+    // (read → validate length → normalize → multiply → write back): body at
+    // full angle, head/arms at half. If +0x20c is the live rotation, the
+    // upper body visibly TILTS in third person. The +0x48 write below stays
+    // so the first-person position effect is preserved during this test.
+    // Legs stay planted.
     if (m_bodyLeanEnabled && !g_snakeGroups.empty()) {
         const float leanRad = m_currentAngle * 3.14159265f / 180.f;
         for (const auto& tp : g_trackedParts) {
@@ -483,15 +486,36 @@ void LeanModule::onCameraBlend(void* cameraComponent, float /*dt*/) {
                 if (g == tp.group) { snakeGroup = true; break; }
             if (!snakeGroup) continue;
             if (std::strstr(tp.name, "leg")) continue;
+            auto* p = reinterpret_cast<unsigned char*>(tp.addr);
             float k = m_bodyScale;
             if (std::strcmp(tp.name, "head") == 0) k = m_headScale * 0.5f;
             else if (std::strstr(tp.name, "arm"))  k = m_armScale  * 0.5f;
-            *reinterpret_cast<float*>(
-                reinterpret_cast<unsigned char*>(tp.addr) + 0x48) = leanRad * k;
+
+            // (a) +0x48 — proven visible effect (position-like slide);
+            //     kept because the user wants the first-person movement.
+            *reinterpret_cast<float*>(p + 0x48) = leanRad * k;
+
+            // (b) +0x20c — live rotation quat candidate: roll composed onto
+            //     the part's current rotation.
+            auto* q = reinterpret_cast<float*>(p + 0x20c);
+            Quat cur{q[0], q[1], q[2], q[3]};
+            const float qlen = std::sqrt(cur.x * cur.x + cur.y * cur.y +
+                                         cur.z * cur.z + cur.w * cur.w);
+            if (qlen > 0.5f && qlen < 1.5f) {
+                cur = quatNormalize(cur);
+                const float h = leanRad * k * 0.5f;
+                const Quat rollQ{0.f, 0.f, std::sin(h), std::cos(h)};
+                const Quat out = quatNormalize(quatMul(cur, rollQ));
+                q[0] = out.x;
+                q[1] = out.y;
+                q[2] = out.z;
+                q[3] = out.w;
+            }
         }
         if (!g_writeProbeLogged) {
             g_writeProbeLogged = true;
-            probeFileLog("write probe v3 active: parts=%zu angle=%.2f deg",
+            probeFileLog("write probe v4 active: parts=%zu angle=%.2f deg "
+                         "(+0x48 kept, quat@0x20c composed)",
                          g_trackedParts.size(),
                          static_cast<double>(m_currentAngle));
         }
@@ -523,6 +547,27 @@ void LeanModule::onCameraBlend(void* cameraComponent, float /*dt*/) {
         return;
     }
     cur = quatNormalize(cur);
+
+    // --- Batch-6 shake probe: did the roll we wrote last frame survive? ---
+    // Extract the roll (twist around the view axis) from the incoming quat
+    // and compare with the roll we applied. Zero quat rejections in the last
+    // session proved this hook never bails — so the gun mod's camera shake
+    // must overwrite the quat AFTER this hook. This log pins the wipe down
+    // so the follow-up hook applies the roll after it.
+    if (m_enableRoll && std::fabs(m_currentAngle) > 1.f) {
+        static unsigned s_rollMismatch = 0;
+        const float measuredDeg = 2.f * std::atan2(cur.z, cur.w) * 57.29578f;
+        const float expectedDeg = m_currentAngle * m_firstPersonRollMult;
+        if (std::fabs(measuredDeg - expectedDeg) > 3.f) {
+            ++s_rollMismatch;
+            if ((s_rollMismatch % 60) == 1)
+                probeFileLog("roll wiped? expected %.1f deg, frame entry "
+                             "%.1f deg (#%u)",
+                             static_cast<double>(expectedDeg),
+                             static_cast<double>(measuredDeg),
+                             static_cast<unsigned>(s_rollMismatch));
+        }
+    }
 
     // --- Position @ +0x38,+0x3c,+0x40 (from CameraBlendSystem copy) ---
     if (m_enableLateral && std::fabs(m_currentLateral) > 1e-5f) {
